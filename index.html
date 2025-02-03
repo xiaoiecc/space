@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>可调多边形弹跳球</title>
+    <style>
+        canvas {
+            border: 2px solid #333;
+            display: block;
+            margin: 20px auto;
+            background-color: #f0f0f0;
+        }
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #fff;
+            position: relative;
+        }
+        #controlPanel {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .control-item {
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .value-display {
+            cursor: pointer;
+            padding: 2px 5px;
+            border-radius: 3px;
+            transition: background 0.2s;
+        }
+        .value-display:hover {
+            background: #eee;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="600" height="600"></canvas>
+    
+    <div id="controlPanel">
+        <div class="control-item">
+            <label>边数:</label>
+            <input type="range" id="sides" min="3" max="12" step="1" value="6">
+            <span class="value-display" data-target="sides">6</span>
+        </div>
+        <div class="control-item">
+            <label>重力:</label>
+            <input type="range" id="gravity" min="0" max="2" step="0.1" value="0.5">
+            <span class="value-display" data-target="gravity">0.5</span>
+        </div>
+        <div class="control-item">
+            <label>表面摩擦:</label>
+            <input type="range" id="friction" min="0" max="1" step="0.05" value="0.7">
+            <span class="value-display" data-target="friction">0.7</span>
+        </div>
+        <div class="control-item">
+            <label>反弹系数:</label>
+            <input type="range" id="bounce" min="0" max="1" step="0.05" value="0.85">
+            <span class="value-display" data-target="bounce">0.85</span>
+        </div>
+        <div class="control-item">
+            <label>旋转速度:</label>
+            <input type="range" id="rotation" min="0" max="0.1" step="0.005" value="0.015">
+            <span class="value-display" data-target="rotation">0.015</span>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // 可调参数
+        let params = {
+            sides: 6,
+            gravity: 0.5,
+            friction: 0.7,
+            bounce: 0.85,
+            rotation: 0.015
+        };
+
+        // 多边形属性
+        const polygonCenter = { x: canvas.width / 2, y: canvas.height / 2 };
+        const polygonRadius = 250;
+        let polygonRotation = 0;
+        
+        // 球属性
+        let ball = {
+            x: polygonCenter.x,
+            y: polygonCenter.y - 150,
+            radius: 12,
+            vx: 3,
+            vy: 0
+        };
+
+        // 初始化控制面板
+        function initControls() {
+            document.querySelectorAll('input[type="range"]').forEach(slider => {
+                slider.addEventListener('input', (e) => {
+                    const target = e.target.id;
+                    const value = e.target.id === 'sides' ? 
+                        parseInt(e.target.value) : parseFloat(e.target.value);
+                    params[target] = value;
+                    document.querySelector(`span[data-target="${target}"]`).textContent = value;
+                });
+            });
+
+            document.querySelectorAll('.value-display').forEach(display => {
+                display.addEventListener('click', () => {
+                    const target = display.dataset.target;
+                    const current = params[target];
+                    const newValue = prompt(`输入新的${display.previousElementSibling.textContent}值:`, current);
+                    if (!isNaN(newValue) && newValue !== null) {
+                        const numValue = target === 'sides' ? 
+                            parseInt(newValue) : parseFloat(newValue);
+                        const slider = document.getElementById(target);
+                        params[target] = numValue;
+                        slider.value = numValue;
+                        display.textContent = numValue;
+                    }
+                });
+            });
+        }
+        initControls();
+
+        // 生成多边形顶点
+        function updatePolygonVertices(rotation) {
+            const vertices = [];
+            const angleStep = (2 * Math.PI) / params.sides;
+            for (let i = 0; i < params.sides; i++) {
+                const angle = rotation + i * angleStep;
+                vertices.push({
+                    x: polygonCenter.x + polygonRadius * Math.cos(angle),
+                    y: polygonCenter.y + polygonRadius * Math.sin(angle)
+                });
+            }
+            return vertices;
+        }
+
+        // 计算点到线段的最短距离
+        function distanceToSegment(P, A, B) {
+            const APx = P.x - A.x;
+            const APy = P.y - A.y;
+            const ABx = B.x - A.x;
+            const ABy = B.y - A.y;
+            const ab2 = ABx * ABx + ABy * ABy;
+            const ap_ab = APx * ABx + APy * ABy;
+            let t = ap_ab / ab2;
+            t = Math.max(0, Math.min(1, t));
+            
+            const closest = {
+                x: A.x + ABx * t,
+                y: A.y + ABy * t
+            };
+            const dx = P.x - closest.x;
+            const dy = P.y - closest.y;
+            
+            return {
+                distance: Math.sqrt(dx * dx + dy * dy),
+                closest: closest
+            };
+        }
+
+        // 碰撞检测
+        function checkCollision(ball, vertices) {
+            let collisionInfo = {
+                collided: false,
+                distance: Infinity,
+                normal: { x: 0, y: 0 },
+                closest: { x: 0, y: 0 }
+            };
+
+            for (let i = 0; i < vertices.length; i++) {
+                const A = vertices[i];
+                const B = vertices[(i + 1) % vertices.length];
+                const result = distanceToSegment(ball, A, B);
+                
+                if (result.distance < collisionInfo.distance) {
+                    collisionInfo.distance = result.distance;
+                    collisionInfo.closest = result.closest;
+                    
+                    // 计算表面法线（垂直于边指向内部）
+                    const edgeX = B.x - A.x;
+                    const edgeY = B.y - A.y;
+                    const normalX = -edgeY;
+                    const normalY = edgeX;
+                    const length = Math.sqrt(normalX**2 + normalY**2);
+                    collisionInfo.normal = { 
+                        x: normalX / length, 
+                        y: normalY / length 
+                    };
+                }
+            }
+
+            collisionInfo.collided = collisionInfo.distance < ball.radius;
+            return collisionInfo;
+        }
+
+        // 更新球状态（改进的摩擦处理）
+        function updateBall() {
+            // 仅应用重力
+            ball.vy += params.gravity;
+
+            // 临时新位置
+            const newPos = {
+                x: ball.x + ball.vx,
+                y: ball.y + ball.vy,
+                radius: ball.radius
+            };
+
+            // 检测碰撞
+            const vertices = updatePolygonVertices(polygonRotation);
+            const collision = checkCollision(newPos, vertices);
+
+            if (collision.collided) {
+                // 速度分解
+                const normal = collision.normal;
+                const velocity = { x: ball.vx, y: ball.vy };
+                
+                // 法线分量
+                const dot = velocity.x * normal.x + velocity.y * normal.y;
+                const normalComponent = {
+                    x: dot * normal.x,
+                    y: dot * normal.y
+                };
+                
+                // 切线分量
+                const tangentComponent = {
+                    x: velocity.x - normalComponent.x,
+                    y: velocity.y - normalComponent.y
+                };
+
+                // 应用摩擦和反弹
+                const reflectedNormal = {
+                    x: -normalComponent.x * params.bounce,
+                    y: -normalComponent.y * params.bounce
+                };
+                
+                const frictionedTangent = {
+                    x: tangentComponent.x * params.friction,
+                    y: tangentComponent.y * params.friction
+                };
+
+                // 更新速度
+                ball.vx = reflectedNormal.x + frictionedTangent.x;
+                ball.vy = reflectedNormal.y + frictionedTangent.y;
+
+                // 位置修正
+                ball.x = collision.closest.x + normal.x * (ball.radius + 1);
+                ball.y = collision.closest.y + normal.y * (ball.radius + 1);
+            } else {
+                // 无碰撞时正常移动
+                ball.x = newPos.x;
+                ball.y = newPos.y;
+            }
+        }
+
+        // 绘制多边形
+        function drawPolygon(vertices) {
+            ctx.beginPath();
+            ctx.moveTo(vertices[0].x, vertices[0].y);
+            for (let i = 1; i < vertices.length; i++) {
+                ctx.lineTo(vertices[i].x, vertices[i].y);
+            }
+            ctx.closePath();
+            ctx.strokeStyle = '#2c3e50';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        // 动画循环
+        function animate() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 更新旋转
+            polygonRotation += params.rotation;
+            
+            // 绘制多边形
+            const vertices = updatePolygonVertices(polygonRotation);
+            drawPolygon(vertices);
+            
+            // 更新和绘制球
+            updateBall();
+            ctx.beginPath();
+            ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+            ctx.fillStyle = '#e74c3c';
+            ctx.fill();
+            
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
